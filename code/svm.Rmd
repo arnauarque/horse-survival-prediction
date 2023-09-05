@@ -1,0 +1,656 @@
+---
+title: "AML Project - SVMs"
+author: "Arnau Arqué and Daniel Esquina"
+date: "December 22, 2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# AML Project - Predicting horse death with SVMs
+
+```{r}
+library(kernlab)
+library(tictoc)
+library(e1071)
+library(dplyr)
+
+# Print with format
+printf <- function(s, ...) {
+    cat(sprintf(s, ...))
+}
+
+# Converts de DF to a numeric non-named matrix
+to.matrix <- function(df) {
+    mtx <- matrix(as.numeric(as.matrix.data.frame(unname(df))), ncol = ncol(df))
+    return(mtx)
+}
+
+# Converts the categories of categorical variables of 'df' to numbers from 1..numCategories
+categories_as_numbers <- function(df) {
+    for (i in 1:ncol(df)) {
+        if (is.factor(df[,i])) {
+            df[,i] <- as.factor(as.numeric(df[,i]))
+        }
+    }
+    return(df)
+}
+```
+
+## Numerical data approach
+
+The first approach we will test is to use all the numerical data (the original variables and the one-hot-encoded ones) with an RBF kernel and see how the SVM behaves.
+
+Let's first read the data.
+
+```{r}
+# --------------------------------------------------------------------------------
+# -- READING DATA
+# --------------------------------------------------------------------------------
+
+# Training data
+horseTrain <- read.csv('./data/preprocessed/trainMinMax.csv', stringsAsFactors = TRUE)
+# Test data
+horseTest <- read.csv('./data/preprocessed/testMinMax.csv', stringsAsFactors = TRUE)
+
+# --------------------------------------------------------------------------------
+# -- TRAINING SET (with configuration/parametrization)
+# --------------------------------------------------------------------------------
+
+# Train data as numbers (with outcome)
+xtrain.num <- select_if(horseTrain, is.numeric)
+xtrain.num <- xtrain.num[,1:(ncol(xtrain.num)-3)]
+# Converting DF to numeric unnamed matrix
+xtrain.num <- to.matrix(xtrain.num)
+# Train labels
+ytrain.num <- as.vector(horseTrain$outcome, mode = 'integer')
+
+# --------------------------------------------------------------------------------
+# -- TEST SET
+# --------------------------------------------------------------------------------
+
+# Test data as numbers (with outcome)
+xtest.num <- select_if(horseTest, is.numeric)
+xtest.num <- xtest.num[,1:(ncol(xtest.num)-3)]
+# Converting DF to numeric unnamed matrix
+xtest.num <- to.matrix(xtest.num)
+# Test labels
+ytest.num <- as.vector(horseTest$outcome, mode = 'integer')
+```
+
+We will define a function that performs k-fold CV in order to estimate the $\gamma$ and $C$ parameters.
+
+```{r}
+# Function that runs k-CV
+cv.num <- function(k, xtrain, ytrain, cs, gammas) {
+    folds <- sample(rep(1:k, length = nrow(xtrain)), nrow(xtrain), replace = FALSE)
+    v.errors <- list()
+    lowest.error <- Inf
+    best.gamma <- Inf
+    best.c <- Inf
+
+    # Cross-Validation
+    printf('Running %d-fold CV...\n', k)
+    it <- 1
+    for (gamma in gammas) {
+        printf('gamma = %.4f (%d/%d) ', gamma, it, length(gammas))
+        krbf <- rbfdot(sigma = gamma)
+        for (C in cs) {
+            printf('.')
+            valid.error <- rep(0, k)
+            for (i in 1:k) {
+                # Train data
+                x_train <- xtrain[folds != i,]
+                y_train <- ytrain[folds != i]
+                # Validation data
+                x_valid <- xtrain[folds == i,]
+                y_valid <- ytrain[folds == i]
+                # Training and predicting
+                model <- ksvm(x = x_train, y = y_train, 
+                             type = 'C-svc',
+                             C = C,
+                             kernel = krbf, 
+                             scaled = c())
+                pred <- predict(model, x_valid)
+                # Storing validation error
+                valid.error[i] <- sum(pred != y_valid)/length(y_valid)
+            }
+            # Returning average validation error
+            verror <- 100*sum(valid.error)/length(valid.error)
+            #printf('\n\tValidation error: %.6f\n', verror)
+            v.errors[[sprintf('g%.4f-c%.4f', gamma, C)]] <- verror
+            # Storing best C
+            if (verror < lowest.error) {
+                best.gamma <- gamma
+                best.c <- C
+                lowest.error <- verror
+            }
+        }
+        printf('\n')
+        it <- it + 1
+    }
+    res <- list(best.c = best.c, 
+                best.gamma = best.gamma, 
+                lowest.error = lowest.error,
+                valid.errors = v.errors)
+    return(res)
+}
+```
+
+Now, let's estimate the $\gamma$ and $C$ parameter with 10-fold CV.
+
+```{r}
+# Values to check
+gammas <- seq(from = 0.0001, to = 1, by = 0.05)
+cs <- 10^seq(from = -2, to = 5, by = 0.5)
+#cs <- 10^seq(from = 0, to = 0.5, by = 0.05)
+
+# CV
+k <- 10
+tic('Gamma estimation')
+res.cv.num <- cv.num(k, xtrain.num, ytrain.num, cs, gammas)
+toc()
+
+# Showing results
+params <- res.cv.num
+printf('PARAMETERS ESTIMATION RESULTS:\n\tBest gamma: %.4f\n', params$best.gamma)
+printf('\tBest C: %.4f', params$best.c)
+```
+
+Training and testing stage.
+
+```{r}
+# Definining the kernel
+krbf <- rbfdot(params$best.gamma)
+
+# Training phase
+model <- ksvm(x = xtrain.num, y = ytrain.num, 
+             type = 'C-svc',
+             C = params$best.c, 
+             kernel = krbf, 
+             scaled = c())
+
+# Prediction phase
+pred.num <- predict(model, xtest.num)
+
+# Storing validation error
+valid_error <- 100*sum(pred.num != ytest.num)/length(ytest.num)
+printf('RESULTS gamma=%.4f, C=%.4f):\n', params$best.gamma, params$best.c)
+printf('\tValidation error: %.2f %%\n', valid_error)
+printf('\tAccuracy: %.2f %%\n', 100-valid_error)
+```
+
+Let's try now with the *Missing* variables.
+
+```{r}
+# --------------------------------------------------------------------------------
+# -- TRAINING SET (with configuration/parametrization)
+# --------------------------------------------------------------------------------
+
+# Train data as numbers (with outcome)
+xtrain.num.missings <- select_if(horseTrain, is.numeric)
+xtrain.num.missings <- xtrain.num.missings[,1:(ncol(xtrain.num.missings)-3)]
+# Converting DF to numeric unnamed matrix
+xtrain.num.missings <- to.matrix(xtrain.num.missings)
+# Train labels
+ytrain.num.missings <- as.vector(horseTrain$outcome, mode = 'integer')
+
+# Missing vars
+train.ms <- to.matrix(categories_as_numbers(horseTrain[,26:41]))
+xtrain.num.missings <- cbind(xtrain.num.missings, train.ms)
+
+# --------------------------------------------------------------------------------
+# -- TEST SET
+# --------------------------------------------------------------------------------
+
+# Test data as numbers (with outcome)
+xtest.num.missings <- select_if(horseTest, is.numeric)
+xtest.num.missings <- xtest.num.missings[,1:(ncol(xtest.num.missings)-3)]
+# Converting DF to numeric unnamed matrix
+xtest.num.missings <- to.matrix(xtest.num.missings)
+# Test labels
+ytest.num.missings <- as.vector(horseTest$outcome, mode = 'integer')
+
+# Missing vars
+test.ms <- to.matrix(categories_as_numbers(horseTest[,26:41]))
+xtest.num.missings <- cbind(xtest.num.missings, test.ms)
+```
+
+Estimating parameters.
+
+```{r}
+# Values to check
+gammas <- seq(from = 0.0001, to = 1, by = 0.05)
+#cs <- 10^seq(from = -2, to = 5, by = 0.5)
+cs <- 10^seq(from = 0, to = 0.5, by = 0.05)
+
+# CV
+tic('Gamma estimation')
+k <- 10
+res.cv.num.missings <- cv.num(k, xtrain.num.missings, ytrain.num.missings, cs, gammas)
+toc()
+
+# Showing results
+params <- res.cv.num.missings
+printf('PARAMETERS ESTIMATION RESULTS:\n\tBest gamma: %.4f\n', params$best.gamma)
+printf('\tBest C: %.4f', params$best.c)
+```
+
+Training / test stage.
+
+```{r}
+# Definining the kernel
+krbf <- rbfdot(params$best.gamma)
+
+# Training phase
+model <- ksvm(x = xtrain.num.missings, y = ytrain.num.missings, 
+             type = 'C-svc',
+             C = params$best.c, 
+             kernel = krbf, 
+             scaled = c())
+
+# Prediction phase
+pred.num.missings <- predict(model, xtest.num.missings)
+
+# Storing validation error
+valid_error <- 100*sum(pred.num.missings != ytest.num)/length(ytest.num)
+printf('RESULTS gamma=%.4f, C=%.4f):\n', params$best.gamma, params$best.c)
+printf('\tValidation error: %.2f %%\n', valid_error)
+printf('\tAccuracy: %.2f %%\n', 100-valid_error)
+```
+
+## Mixed data approach
+
+In this approach we will generate a kernel function that allow us to use directly our mixed-data dataset with an SVM. Let's define the *inner* and *aggregation* kernel functions:
+
+$$
+k_{inner}(x,x') = \frac{1}{d}\sum_{i=1}^d k_i(x_i, x'_i)
+$$
+
+Where $d$ is the data dimensionality and $k_i$ is a kernel with the same domain as $x_i$ and $x'_i$.
+
+$$
+k_{aggr}(x,x') = \frac{\exp(\gamma \cdot k_{inner}(x,x'))-1}{\exp(\gamma)-1}
+$$
+
+Where $x,\ x'$ are input data and $\gamma$ is a hyperparameter which value has to be estimated.
+
+We will simplify the RBF kernel by setting $\sigma = 1$, so that:
+
+$$
+k_{rbf}(x,x') = \exp(-||x-x'||^2)
+$$
+
+The univariate kernel is defined as:
+
+$$
+k_{uni}(x_i,x_i') = 
+\begin{cases} 
+h_\alpha(P_Z(x_i)) & \text{if}\ x_i = x_i' \\
+0 & \text{if}\ x_i \neq x_i'
+\end{cases}
+$$
+
+Where, $x_i,x_i'$ are categorical data and $Z$ is the categorical variable with $P_Z:Z \rightarrow [0,1]$ as probability function ($P_Z(x_i)$ computes the probability that the variable $Z$ takes value \$x_i\$). The function $h_\alpha:[0,1] \rightarrow (0,1)$ is defined as follows:
+
+$$
+h_\alpha (x) = (1-x^\alpha)^{1/\alpha}
+$$
+
+Notice that $\alpha$ is a hyperparameter that, in normal conditions, must be estimated. However, to simplify the execution of the SVM, we will set $\alpha = 1$.
+
+We will also use the Jaccard kernel, which is directly based on the jaccard similarity index.
+
+```{r}
+# Univariate kernel
+k_uni <- function(P_Z, alpha) {
+    k_uni_func <- function(x, y = NULL) {
+        if (is.null(P_Z)) 
+            stop('(k_uni) Probability function P_Z missing in parameters')
+        sim <- 0
+        if (is.null(y) || is.na(y) || x == y) {
+            sim <- (1 - P_Z[x]^alpha)^(1/alpha)
+        }
+        return(sim)
+    }
+    return(new('kernel', .Data = k_uni_func, kpar = list(P_Z = P_Z, alpha = alpha)))
+}
+
+# Jaccard similarity kernel
+k_jac <- function() {
+    k_jac_func <- function(x, y = NULL) {
+        jsim <- 1
+        if (!is.null(y) && !is.na(y)) {
+            if (length(x) != length(y))
+                stop('(k_jac) All data points must have the same dimension')
+            n01 = n10 = n11 = 0
+            for (i in 1:length(x)) {
+                if (x[i] == 0 && y[i] == 1) n01 <- n01 + 1
+                else if (x[i] == 1 && y[i] == 0) n10 <- n10 + 1
+                else if (x[i] == 1 && y[i] == 1) n11 <- n11 + 1
+            }
+            den <- n01 + n10 + n11
+            if (den == 0) jsim <- 0
+            else jsim <- n11/den
+        }
+        return(jsim)
+    }
+    return(new('kernel', .Data = k_jac_func, kpar = list()))
+}
+
+# Inner kernel
+k_inner <- function(config, params) {
+    k_inner_func <- function(x, y = NULL) {
+        if (length(x) != length(y))
+            stop('(k_inner) All data points must have the same dimension')
+        # Initializing kernels
+        rbf <- rbfdot(sigma = 1)
+        lin <- vanilladot()
+        jacc <- k_jac()
+        # Defining parameters
+        d <- .0
+        kavg <- .0
+        for (k in names(config)) {
+            vars = config[[k]]
+            # RBF kernel
+            if (k == 'rbf') {
+                d <- d + 1
+                kavg <- kavg + rbf(x[vars], y[vars])
+                #if (is.na(kavg)) stop('RBF: result is NA')
+            }
+            # Linear kernel
+            else if (k == 'lin') {
+                d <- d + 1
+                kavg <- kavg + lin(x[vars], y[vars])
+                #if (is.na(kavg)) stop('LIN: result is NA')
+            }
+            # Jaccard kernel
+            else if (k == 'jac') {
+                d <- d + 1
+                kavg <- kavg + jacc(x[vars], y[vars])
+                #if (is.na(kavg)) stop('JAC: result is NA')
+            }
+            # Univariate kernel
+            else if (k == 'uni') {
+                d <- d + length(config$uni)
+                for (col in config$uni) {
+                    uni <- k_uni(P_Z = params[[sprintf('P_Z%d', col)]], alpha = 1.0)
+                    kavg <- kavg + uni(x[col], y[col])
+                    #if (is.na(kavg)) stop('UNI: result is NA')
+                }
+            }
+            else stop(sprintf('Kernel "%s" not recognized', k))
+        }
+        if (is.na(kavg)) stop('kavg = NA')
+        if (is.na(d)) stop('d = NA')
+        return(kavg/d)
+    }
+    return(new('kernel', .Data = k_inner_func, kpar = list(config = config, params = params)))
+}
+
+# Aggregate kernel
+k_aggr <- function(gamma, config, params) {
+    k_aggr_func <- function(x, y = NULL) {
+        kinn <- k_inner(config = config, params = params)
+        a <- exp(gamma * kinn(x,y)) - 1
+        b <- exp(gamma) - 1
+        return(a/b)
+    }
+    return(new('kernel', .Data = k_aggr_func, kpar = list(gamma = gamma, 
+                                                          config = config, 
+                                                          params = params)))
+}
+```
+
+Since we believe that the computational cost will be high, we will also create the 'precomputed-kernel' that will access the different values of the precomputed kernel matrix, so that the SVM does not need to compute each similarity measure.
+
+```{r}
+pre_k_aggr <- function(preK) {
+    rval <- function(i, j = NULL) {
+        if (is.null(j)) preK[i,i]
+        else preK[i,j]
+    }
+    return(new('kernel', .Data = rval, kpar = list(preK = preK)))
+}
+```
+
+Once we have our kernels defined, we can start by estimating the value of the hyperparameters. Since we will use the newly defined *aggregate kernel*, we will need to estimate the $\gamma$ hyperparameter (we do not need to estimate any parameter of the subkernels, since we have already set a specific value). To do so, we will start by computing the quadratic sum of all the data in the feature space, *i.e.:*
+
+$$
+||\Phi(x)-\Phi(x')||^2 = 2\cdot (1-k_{inner}(x,x'))
+$$
+
+Then, we will sort the results obtained in ascending order. Finally, we will get the first and third quantile $Q_1$, $Q_3$ and we will establish $\gamma$ as the average between them:
+
+$$
+\gamma = \frac{Q_1 + Q_3}{2}
+$$
+
+```{r}
+estimate_gamma <- function(data, config, params) {
+    printf('Estimating gamma ')
+    l <- nrow(data)
+    kvec <- c()
+    kinn <- k_inner(config, params)
+    # Computing comparisions with the inner kernel
+    for (i in 1:(l-1)) {
+        if (round(i %% 20) == 0) printf('.')
+        for (j in (i+1):l) {
+            kres <- kinn(data[i,], data[j,])
+            kvec <- c(kvec, 2*(1-kres))
+        }
+    }
+    printf('\n')
+    # Sorting results
+    kvec <- sort(kvec)
+    # Computing quantiles
+    q1 <- round(l*0.25)
+    q3 <- round(l*0.75)
+    # Computing gamma
+    gamma <- (kvec[q1] + kvec[q3])/2.0
+    return (gamma)
+}
+```
+
+Furthermore, we will use a $C$-SVM, so we will also have to estimate the value of $C$. To do so, we will set the previously estimated value of $\gamma$ and apply 10-fold CV using the training data.
+
+```{r}
+cv <- function(k, x, y, C, gamma, config, params) {
+    folds <- sample(rep(1:k, length = nrow(x)), nrow(x), replace = FALSE) 
+    valid_error <- rep(0, k)
+    aggr <- k_aggr(gamma, config, params)
+    for (i in 1:k) {
+        printf('.')
+        # Train data
+        x_train <- x[folds != i,]
+        y_train <- y[folds != i]
+        # Validation data
+        x_valid <- x[folds == i,]
+        y_valid <- y[folds == i]
+        # Training and predicting
+        model <- ksvm(x = x_train, y = y_train, 
+                     type = 'C-svc',
+                     C = C,
+                     kernel = aggr, 
+                     scaled = c())
+        pred <- predict(model, x_valid)
+        # Storing validation error
+        valid_error[i] <- sum(pred != y_valid)/length(y_valid)
+    }
+    # Returning average validation error
+    return(100*sum(valid_error)/length(valid_error))
+}
+
+estimate_C <- function(k, cs, x, y, gamma, config, params) {
+    printf('Estimating C parameter (%d-fold CV)\n', k)
+    # Folds and validation error
+    avg_valid_error <- rep(0, length(cs))
+    # For each value of C
+    for (i in 1:length(cs)) {
+        printf('\tC = %.4f ', cs[i])
+        avg_valid_error[i] <- cv(k, x, y, cs[i], gamma, config, params)
+        printf('\n')
+    }
+    best_i <- which(avg_valid_error == min(avg_valid_error))
+    return(cs[best_i])
+}
+```
+
+Let's train the SVM.
+
+First, configuration and parametrization of the kernel functions and the SVM.
+
+```{r}
+# --------------------------------------------------------------------------------
+# -- READING DATA
+# --------------------------------------------------------------------------------
+
+# Training data
+horseTrain <- read.csv('./data/preprocessed/trainStd.csv', stringsAsFactors = TRUE)
+horseTrain
+# Test data
+horseTest <- read.csv('./data/preprocessed/testStd.csv', stringsAsFactors = TRUE)
+horseTest
+
+# --------------------------------------------------------------------------------
+# -- TRAINING SET (with configuration/parametrization)
+# --------------------------------------------------------------------------------
+
+# Notice that in this approach we will use the original variables (non-discretized / 
+# non-numerized) and we will use a domain-specific kernel for each variable type
+ncols <- 41 # Columns of the original data (including 'missing' vars)
+out <- which(names(horseTrain) == 'outcome') # Idx of the outcome variable
+#ncols <- out
+
+# Train data as numbers (with outcome)
+xtrain <- categories_as_numbers(horseTrain)
+# Train labels
+ytrain <- as.vector(xtrain$outcome, mode = 'integer')
+# Train data
+xtrain <- xtrain[,c(1:(out-1),(out+1):ncols)]
+#xtrain <- xtrain[,1:(out-1)]
+
+# Configuration and parameters
+config <- list()
+params <- list()
+for (i in 1:ncol(xtrain)) {
+    # RBF of Polynomial kernel
+    if (is.numeric(xtrain[,i])) {
+        config$rbf <- c(config$rbf, i)
+    }
+    # Univariate or Jaccard kernel
+    else if (is.factor(xtrain[,i])) {
+        # Jaccard kernel (binary variable)
+        ncat <- length(levels(xtrain[,i]))
+        if (ncat == 2) {
+            config$jac <- c(config$jac, i)
+        }
+        # Univariate kernel (categorical variable)
+        else {
+            config$uni <- c(config$uni, i)
+            # Computing P_Zi
+            key <- sprintf('P_Z%d',i)
+            ncat <- length(levels(xtrain[,i]))
+            for (val in 1:ncat) {
+                p <- sum(xtrain[,i] == val)/nrow(xtrain)
+                params[[key]] <- c(params[[key]], p)
+            }
+        }
+    }
+    else printf('Warning: "%s" variable type not recognized.', names(xtrain)[i])
+}
+
+# Converting DF to numeric unnamed matrix
+xtrain <- to.matrix(xtrain)
+
+# --------------------------------------------------------------------------------
+# -- TEST SET
+# --------------------------------------------------------------------------------
+
+# Test data as numbers (with outcome)
+xtest <- categories_as_numbers(horseTest)
+# Test labels
+ytest <- as.vector(xtest$outcome, mode = 'integer')
+# Test data
+xtest <- to.matrix(xtest[,c(1:(out-1),(out+1):ncols)])
+#xtest <- to.matrix(xtest[,1:(out-1)])
+```
+
+Estimation of the $\gamma$ parameter.
+
+```{r}
+# Estimating gamma
+tic('Gamma estimation')
+best.gamma <- estimate_gamma(xtrain, config, params)
+#gamma <- 0.9400695
+toc()
+printf('\tgamma = %.5f\n', best.gamma)
+```
+
+Estimation of the $C$ parameter.
+
+```{r}
+# Estimating C
+tic('C estimation')
+k <- 5
+cs <- 10^seq(from = -1, to = 1, by = 0.5)
+best.c <- estimate_C(k = k, cs = cs, xtrain, ytrain, best.gamma, config, params)
+toc()
+printf('\tC = %.5f\n', best.c)
+```
+
+Finally, training and testing stage:
+
+```{r}
+# Definining the kernel
+aggr <- k_aggr(best.gamma, config, params)
+
+# Training phase
+tic('Training phase')
+model.aggr <- ksvm(x = xtrain, y = ytrain, 
+             type = 'C-svc',
+             C = best.c, 
+             kernel = aggr, 
+             scaled = c())
+toc()
+
+# Prediction phase
+tic('Prediction phase')
+pred.aggr <- predict(model.aggr, xtest)
+toc()
+
+# Storing validation error
+valid_error <- 100*sum(pred.aggr != ytest)/length(ytest)
+printf('RESULTS gamma=%.4f, C=%.4f):\n', best.gamma, best.c)
+printf('\tValidation error: %.2f %%\n', valid_error)
+printf('\tAccuracy: %.2f %%\n', 100-valid_error)
+```
+
+## Results
+
+```{r}
+library(caret)
+
+# RBF with numerical data
+res.cv.num$best.gamma
+res.cv.num$best.c
+rbf.num <- confusionMatrix(data = as.factor(pred.num), 
+                           reference = as.factor(ytest.num))
+rbf.num
+
+# RBF with numerical data and missing variables
+res.cv.num.missings$best.gamma
+res.cv.num.missings$best.c
+rbf.num.missings <- confusionMatrix(data = as.factor(pred.num.missings), 
+                                    reference = as.factor(ytest.num.missings))
+rbf.num.missings
+
+# Aggregate with mixed data
+best.gamma
+best.c
+aggr.mixed <- confusionMatrix(data = as.factor(pred.aggr),
+                              reference = as.factor(ytest))
+aggr.mixed
+```

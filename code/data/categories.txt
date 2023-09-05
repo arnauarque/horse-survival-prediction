@@ -1,0 +1,17 @@
+surgery:yes no
+age:adult young
+tempExtrem:normal warm cool cold
+pulsePeripheral:normal increased reduced absent
+mucousMembranes:normalPink brightPink palePink paleCyanotic brightRedInjected darkCyanotic
+capilaryRefillTime:<3 >=3
+pain:alert depressed intermittentMild intermittentSevere continuousSevere
+peristalsis:hypermotile normal hypomotile absent
+abdominalDistension:none slight moderate severe
+nasogastricTube:none slight significant
+nasogastricReflux:none >1liter <1liter
+rectalExamination:normal increased decreased absent
+abdomen:normal other firmFecesLarge distendedSmall distendedLarge
+abdomAppearance:clear cloudy serosanguinous
+outcome:lived died euthanized
+surgicalLesion:yes no
+pathologyData:yes no

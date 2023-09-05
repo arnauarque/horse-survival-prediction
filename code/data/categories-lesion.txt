@@ -1,0 +1,4 @@
+lesionSite:none gastric intestine colon colonCecum cecum colonTransverse colonDescending uterus bladder allIntestinalSites
+lesionType:none simple strangulation inflamation other
+lesionSubtype:none mechanical paralytic
+lesionCode:none obturation intrinsic extrinsic adynamic torsion intussuption thromboembolic hernia lipoma displacement
